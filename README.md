@@ -1,7 +1,5 @@
 # night-shift-production-lab
 
-[![ci](https://github.com/Faissalelmo/night-shift-production-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/Faissalelmo/night-shift-production-lab/actions/workflows/ci.yml)
-
 A small, simulated payments back office that you run on a laptop, **monitor, break on purpose and
 fix** — the way a night-shift IT production engineer works.
 

@@ -1,0 +1,11 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["jobs", "status", "synthetic"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "BLE", "S110"]
+ignore = ["UP017"]  # keep timezone.utc (reads clearer than datetime.UTC for most readers)
+
+[tool.ruff.lint.isort]
+known-first-party = ["lab"]

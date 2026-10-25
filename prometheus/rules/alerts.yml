@@ -1,0 +1,113 @@
+# Alert rules. Mirrored as Grafana-managed rules in
+# grafana/provisioning/alerting/rules.yml. Unit tests: prometheus/tests/alerts_test.yml
+#
+# Every batch job pushes the same metric family, labelled job="<name>", so each
+# rule below covers all jobs at once.
+
+groups:
+  - name: batch-jobs
+    rules:
+      - alert: BatchJobFailed
+        expr: batch_job_last_run_status == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Batch job {{ $labels.job }} failed on its last run"
+          description: "Look up error_type in Kibana (saved search 'Errors by job'), then pick the runbook from runbooks/README.md."
+          runbook: "runbooks/README.md"
+
+      # "Running longer than 2x its usual duration". Usual = median of the last 6 h.
+      # The 30 s floor keeps jobs that normally take ~0.2 s from alerting on noise.
+      # Two branches: a run still in progress (time since start), or a finished run.
+      - alert: BatchJobTooSlow
+        expr: |
+          (
+              (time() - batch_job_last_start_timestamp_seconds) and on(job) (batch_job_running == 1)
+            or
+              batch_job_last_run_duration_seconds and on(job) (batch_job_running == 0)
+          )
+          > on(job)
+          clamp_min(2 * quantile_over_time(0.5, batch_job_last_run_duration_seconds[6h]), 30)
+        labels:
+          severity: warning
+        annotations:
+          summary: "Batch job {{ $labels.job }} is taking {{ $value | humanizeDuration }}, more than 2x its usual duration"
+          runbook: "runbooks/04-slow-query.md"
+
+      # The "silent stop": no run that actually did its work for 3 schedule intervals.
+      # Catches a dead scheduler, a job stuck before pushing, and an empty inbox alike.
+      - alert: BatchJobSilentStop
+        expr: |
+          time() - batch_job_last_success_timestamp_seconds
+            > 3 * batch_job_schedule_interval_seconds
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful {{ $labels.job }} run for {{ $value | humanizeDuration }} (more than 3 schedule intervals)"
+          runbook: "runbooks/01-missing-file.md"
+
+      # An event, not a state: the next run overwrites the per-run count, possibly
+      # seconds later. Looking back 5 min makes sure every evaluator sees the spike.
+      - alert: ReconciliationMismatchesHigh
+        expr: max_over_time(reconciliation_mismatches_last_run[5m]) > 30
+        labels:
+          severity: warning
+        annotations:
+          summary: "A reconciliation run in the last 5 min found {{ $value }} mismatches (threshold 30)"
+          runbook: "runbooks/06-mismatch-spike.md"
+
+      - alert: OutboxAlmostFull
+        expr: extract_outbox_used_ratio > 0.9
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox volume is {{ $value | humanizePercentage }} full"
+          runbook: "runbooks/03-disk-full.md"
+
+  - name: platform
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is not answering the exporter"
+          runbook: "runbooks/02-db-down.md"
+
+      - alert: ScrapeTargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
+
+  - name: synthetic
+    rules:
+      - alert: SyntheticCheckFailed
+        expr: synthetic_check_success == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Synthetic check: the status page did not show OK"
+          description: "The status page mirrors the batch jobs: start from the batch-job alerts firing at the same time."
+          runbook: "runbooks/README.md"
+
+      # Only for pages that loaded: a failed check is SyntheticCheckFailed, and it is
+      # often slow too (timeouts) — alerting twice for one problem is noise.
+      - alert: SyntheticCheckSlow
+        expr: synthetic_check_duration_seconds > 2 and on(job) synthetic_check_success == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "Synthetic check: status page took {{ $value | humanizeDuration }} (threshold 2s)"
+          runbook: "runbooks/07-slow-page.md"
+
+      - alert: SyntheticCheckStale
+        expr: |
+          time() - synthetic_check_last_run_timestamp_seconds
+            > 3 * synthetic_check_interval_seconds
+        labels:
+          severity: warning
+        annotations:
+          summary: "The synthetic check itself has not run for 3 intervals"

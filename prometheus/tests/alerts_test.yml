@@ -1,0 +1,147 @@
+# promtool test rules prometheus/tests/alerts_test.yml  (run by CI)
+rule_files:
+  - ../rules/alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # A failed run alerts immediately; the next good run clears it.
+  - interval: 1m
+    input_series:
+      - series: 'batch_job_last_run_status{job="daily_extract"}'
+        values: '1 1 0 0 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BatchJobFailed
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: BatchJobFailed
+        exp_alerts:
+          - exp_labels: { severity: critical, job: daily_extract }
+            exp_annotations:
+              summary: "Batch job daily_extract failed on its last run"
+              description: "Look up error_type in Kibana (saved search 'Errors by job'), then pick the runbook from runbooks/README.md."
+              runbook: "runbooks/README.md"
+      - eval_time: 4m
+        alertname: BatchJobFailed
+        exp_alerts: []
+
+  # Silent stop: import every 5 min, last success at t=0. Fires once 15 min have
+  # passed without a new success, not before.
+  - interval: 1m
+    input_series:
+      - series: 'batch_job_last_success_timestamp_seconds{job="import_settlement_file"}'
+        values: '0x30'
+      - series: 'batch_job_schedule_interval_seconds{job="import_settlement_file"}'
+        values: '300x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: BatchJobSilentStop
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BatchJobSilentStop
+        exp_alerts:
+          - exp_labels: { severity: critical, job: import_settlement_file }
+            exp_annotations:
+              summary: "No successful import_settlement_file run for 16m 0s (more than 3 schedule intervals)"
+              runbook: "runbooks/01-missing-file.md"
+
+  # Too slow: usual run ~1 s. A run in progress for 60 s exceeds the 30 s floor.
+  - interval: 15s
+    input_series:
+      - series: 'batch_job_last_run_duration_seconds{job="reconcile_transactions"}'
+        values: '1x40'
+      - series: 'batch_job_running{job="reconcile_transactions"}'
+        values: '0x20 1x20'
+      - series: 'batch_job_last_start_timestamp_seconds{job="reconcile_transactions"}'
+        values: '0x20 300x20'
+    alert_rule_test:
+      - eval_time: 5m15s     # running for 15 s: below the floor
+        alertname: BatchJobTooSlow
+        exp_alerts: []
+      - eval_time: 6m        # running for 60 s
+        alertname: BatchJobTooSlow
+        exp_alerts:
+          - exp_labels: { severity: warning, job: reconcile_transactions }
+            exp_annotations:
+              summary: "Batch job reconcile_transactions is taking 1m 0s, more than 2x its usual duration"
+              runbook: "runbooks/04-slow-query.md"
+
+  # Too slow, finished run: duration 90 s against a usual ~1 s.
+  - interval: 1m
+    input_series:
+      - series: 'batch_job_last_run_duration_seconds{job="reconcile_transactions"}'
+        values: '1x10 90x5'
+      - series: 'batch_job_running{job="reconcile_transactions"}'
+        values: '0x15'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BatchJobTooSlow
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: BatchJobTooSlow
+        exp_alerts:
+          - exp_labels: { severity: warning, job: reconcile_transactions }
+            exp_annotations:
+              summary: "Batch job reconcile_transactions is taking 1m 30s, more than 2x its usual duration"
+              runbook: "runbooks/04-slow-query.md"
+
+  # A spike overwritten by a normal run 1 min later still alerts for 5 min, then clears.
+  - interval: 1m
+    input_series:
+      - series: 'reconciliation_mismatches_last_run{job="reconcile_transactions"}'
+        values: '8 12 140 3 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ReconciliationMismatchesHigh
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ReconciliationMismatchesHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, job: reconcile_transactions }
+            exp_annotations:
+              summary: "A reconciliation run in the last 5 min found 140 mismatches (threshold 30)"
+              runbook: "runbooks/06-mismatch-spike.md"
+      - eval_time: 8m
+        alertname: ReconciliationMismatchesHigh
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'synthetic_check_success{job="synthetic_status_check"}'
+        values: '1 0 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: SyntheticCheckFailed
+        exp_alerts:
+          - exp_labels: { severity: critical, job: synthetic_status_check }
+            exp_annotations:
+              summary: "Synthetic check: the status page did not show OK"
+              description: "The status page mirrors the batch jobs: start from the batch-job alerts firing at the same time."
+              runbook: "runbooks/README.md"
+      - eval_time: 2m
+        alertname: SyntheticCheckFailed
+        exp_alerts: []
+
+  # Slow alerts only for pages that loaded: at 1m the check failed (3.1 s timeout),
+  # which is SyntheticCheckFailed's job, not SyntheticCheckSlow's.
+  - interval: 1m
+    input_series:
+      - series: 'synthetic_check_success{job="synthetic_status_check"}'
+        values: '1 0 1 1'
+      - series: 'synthetic_check_duration_seconds{job="synthetic_status_check"}'
+        values: '0.2 3.1 4.1 0.2'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: SyntheticCheckSlow
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: SyntheticCheckSlow
+        exp_alerts:
+          - exp_labels: { severity: warning, job: synthetic_status_check }
+            exp_annotations:
+              summary: "Synthetic check: status page took 4.1s (threshold 2s)"
+              runbook: "runbooks/07-slow-page.md"
+      - eval_time: 3m
+        alertname: SyntheticCheckSlow
+        exp_alerts: []

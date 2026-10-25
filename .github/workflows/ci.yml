@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Python (ruff) and shell (shellcheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.6.9
+      - run: ruff check .
+      - run: ruff format --check .
+      - name: shellcheck (preinstalled on ubuntu runners)
+        run: shellcheck scripts/*.sh jobs/entrypoint.sh jobs/run-job kibana/import.sh
+
+  validate:
+    name: Compose, Prometheus rules, provisioning files
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker compose config
+        run: docker compose config --quiet
+
+      - name: promtool check config + rules
+        run: |
+          docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro" --entrypoint promtool \
+            prom/prometheus:v2.54.1 check config /etc/prometheus/prometheus.yml
+
+      - name: promtool unit tests for the alert rules
+        run: |
+          docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro" -w /etc/prometheus/tests \
+            --entrypoint promtool prom/prometheus:v2.54.1 test rules alerts_test.yml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: JSON / NDJSON / YAML are well-formed
+        run: |
+          pip install pyyaml==6.0.2
+          python3 -m json.tool grafana/dashboards/night-shift.json > /dev/null
+          python3 -c "import json,sys; [json.loads(l) for l in open('kibana/saved-objects.ndjson')]"
+          python3 -c "import yaml,glob; [yaml.safe_load(open(f)) for f in glob.glob('grafana/provisioning/**/*.yml', recursive=True) + ['filebeat/filebeat.yml']]"

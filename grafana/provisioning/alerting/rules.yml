@@ -1,0 +1,279 @@
+# Grafana-managed alert rules: the same conditions as prometheus/rules/alerts.yml.
+# Keep in sync with the Prometheus rules (same expressions, written to return a value per series).
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: night-shift
+    folder: Night Shift
+    interval: 30s
+    rules:
+      - uid: ns-batch-job-failed
+        title: BatchJobFailed
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "batch_job_last_run_status == bool 0"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: "Batch job {{ $labels.job }} failed on its last run"
+          runbook: "runbooks/README.md"
+      - uid: ns-batch-job-too-slow
+        title: BatchJobTooSlow
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "(\n    (time() - batch_job_last_start_timestamp_seconds) and on(job) (batch_job_running == 1)\n  or\n    batch_job_last_run_duration_seconds and on(job) (batch_job_running == 0)\n)\n> on(job)\nclamp_min(2 * quantile_over_time(0.5, batch_job_last_run_duration_seconds[6h]), 30)"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: "Batch job {{ $labels.job }} is running more than 2x its usual duration"
+          runbook: "runbooks/04-slow-query.md"
+      - uid: ns-batch-job-silent-stop
+        title: BatchJobSilentStop
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "(time() - batch_job_last_success_timestamp_seconds) / batch_job_schedule_interval_seconds"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [3] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: "No successful {{ $labels.job }} run for more than 3 schedule intervals"
+          runbook: "runbooks/01-missing-file.md"
+      - uid: ns-reconciliation-mismatches-high
+        title: ReconciliationMismatchesHigh
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "max_over_time(reconciliation_mismatches_last_run[5m])"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [30] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: "A reconciliation run in the last 5 min found more than 30 mismatches"
+          runbook: "runbooks/06-mismatch-spike.md"
+      - uid: ns-outbox-almost-full
+        title: OutboxAlmostFull
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "extract_outbox_used_ratio"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: "Outbox volume is more than 90% full"
+          runbook: "runbooks/03-disk-full.md"
+      - uid: ns-postgres-down
+        title: PostgresDown
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "pg_up == bool 0"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: "PostgreSQL is not answering the exporter"
+          runbook: "runbooks/02-db-down.md"
+      - uid: ns-scrape-target-down
+        title: ScrapeTargetDown
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "up == bool 0"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.job }}"
+          runbook: "runbooks/README.md"
+      - uid: ns-synthetic-check-failed
+        title: SyntheticCheckFailed
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "synthetic_check_success == bool 0"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: "Synthetic check: the status page did not show OK"
+          runbook: "runbooks/README.md"
+      - uid: ns-synthetic-check-slow
+        title: SyntheticCheckSlow
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "synthetic_check_duration_seconds and on(job) (synthetic_check_success == 1)"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [2] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: "Synthetic check: status page slower than 2s"
+          runbook: "runbooks/07-slow-page.md"
+      - uid: ns-synthetic-check-stale
+        title: SyntheticCheckStale
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: "(time() - synthetic_check_last_run_timestamp_seconds) / synthetic_check_interval_seconds"
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [3] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: "The synthetic check itself has not run for 3 intervals"
+          runbook: "runbooks/README.md"

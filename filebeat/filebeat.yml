@@ -1,0 +1,38 @@
+# Ship the JSON job logs (one object per line) to Elasticsearch.
+filebeat.inputs:
+  - type: filestream
+    id: lab-job-logs
+    paths:
+      - /var/log/lab/*.log
+    parsers:
+      - ndjson:
+          target: ""            # put job, run_id, level, ... at the top level
+          overwrite_keys: true
+          add_error_key: true
+    processors:
+      # Use the job's own timestamp as @timestamp (not the time Filebeat read the line).
+      - timestamp:
+          field: timestamp
+          layouts:
+            - "2006-01-02T15:04:05.999Z"
+          test:
+            - "2026-08-12T01:02:03.456Z"
+      - drop_fields:
+          fields: ["agent", "ecs", "input", "host"]
+          ignore_missing: true
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "jobs-logs-%{+yyyy.MM.dd}"
+
+# Daily indices with Filebeat's template (strings become keyword fields, so
+# job / level / error_type can be aggregated in Kibana without .keyword).
+setup.ilm.enabled: false
+setup.template.enabled: true
+setup.template.name: "jobs-logs"
+setup.template.pattern: "jobs-logs-*"
+setup.template.settings:
+  index.number_of_shards: 1
+  index.number_of_replicas: 0
+
+logging.level: warning

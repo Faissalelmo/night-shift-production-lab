@@ -1,0 +1,248 @@
+# night-shift-production-lab — `docker compose up -d`
+# Every value has a working default; copy .env.example to .env to change them.
+# All ports are bound to 127.0.0.1 only.
+
+name: night-shift-lab
+
+x-lab-env: &lab-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-lab}:${POSTGRES_PASSWORD:-lab}@postgres:5432/${POSTGRES_DB:-payments}
+  PUSHGATEWAY_URL: pushgateway:9091
+  PROMETHEUS_URL: http://prometheus:9090
+  IMPORT_EVERY_MIN: ${IMPORT_EVERY_MIN:-5}
+  RECONCILE_EVERY_MIN: ${RECONCILE_EVERY_MIN:-10}
+  EXTRACT_EVERY_MIN: ${EXTRACT_EVERY_MIN:-15}
+  RECON_GRACE_MINUTES: ${RECON_GRACE_MINUTES:-30}
+  GENERATOR_EVERY_SECONDS: ${GENERATOR_EVERY_SECONDS:-120}
+  TZ: UTC
+
+services:
+  # ---------------------------------------------------------------- data
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab}
+      POSTGRES_DB: ${POSTGRES_DB:-payments}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 512m
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- batch
+  jobs:
+    build: ./jobs
+    image: night-shift-lab/jobs:1.0
+    environment:
+      <<: *lab-env
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./inbox:/data/inbox
+      - ./archive:/data/archive
+      - joblogs:/var/log/lab
+    # The outbox is a deliberately tiny RAM disk so `disk_full` can fill it safely.
+    tmpfs:
+      - /data/outbox:size=5m,mode=1777
+    depends_on:
+      postgres: { condition: service_healthy }
+      pushgateway: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "supercronic"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+    mem_limit: 256m
+    restart: unless-stopped
+
+  generator:
+    build: ./jobs                  # same image as `jobs` (cache hit); never pulled
+    image: night-shift-lab/jobs:1.0
+    entrypoint: ["python", "-m", "lab.generator"]
+    environment: *lab-env
+    volumes:
+      - ./inbox:/data/inbox
+      - joblogs:/var/log/lab
+    depends_on:
+      jobs: { condition: service_healthy }   # after the seed
+    mem_limit: 128m
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- web + synthetic
+  status:
+    build: ./status
+    image: night-shift-lab/status:1.0
+    environment: *lab-env
+    volumes:
+      - joblogs:/var/log/lab
+    ports:
+      - "127.0.0.1:${STATUS_PORT:-8088}:8000"
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: 128m
+    restart: unless-stopped
+
+  synthetic:
+    build: ./synthetic
+    image: night-shift-lab/synthetic:1.0
+    environment:
+      STATUS_URL: http://status:8000/
+      PUSHGATEWAY_URL: pushgateway:9091
+      SYNTHETIC_EVERY_SECONDS: ${SYNTHETIC_EVERY_SECONDS:-300}
+      TZ: UTC
+    volumes:
+      - joblogs:/var/log/lab
+    shm_size: 256m
+    depends_on:
+      jobs: { condition: service_healthy }     # every job has run once
+      status: { condition: service_healthy }
+      pushgateway: { condition: service_healthy }
+    mem_limit: 768m
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- metrics
+  pushgateway:
+    image: prom/pushgateway:v1.9.0
+    command: ["--persistence.file=/data/pushgateway.db", "--persistence.interval=30s"]
+    volumes:
+      - pushgw:/data
+    ports:
+      - "127.0.0.1:${PUSHGATEWAY_PORT:-9091}:9091"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    mem_limit: 64m
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - promdata:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    mem_limit: 384m
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-lab}:${POSTGRES_PASSWORD:-lab}@postgres:5432/${POSTGRES_DB:-payments}?sslmode=disable
+    mem_limit: 64m
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/night-shift.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- logs
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"   # local lab only — never do this in production
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:${ES_PORT:-9200}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null"]
+      interval: 10s
+      timeout: 8s
+      retries: 30
+      start_period: 30s
+    mem_limit: 1g
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+      TELEMETRY_OPTIN: "false"
+      TELEMETRY_ALLOWCHANGINGOPTINSTATUS: "false"   # hides the usage-data banner
+    ports:
+      - "127.0.0.1:${KIBANA_PORT:-5601}:5601"
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:5601/api/status | grep -q '\"level\":\"available\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    mem_limit: 1g
+    restart: unless-stopped
+
+  kibana-setup:
+    image: curlimages/curl:8.10.1
+    entrypoint: ["sh", "/setup/import.sh"]
+    volumes:
+      - ./kibana:/setup:ro
+    depends_on:
+      kibana: { condition: service_healthy }
+    restart: "no"
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.3
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - joblogs:/var/log/lab:ro
+      - filebeat:/usr/share/filebeat/data
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    mem_limit: 192m
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  joblogs:
+  pushgw:
+  promdata:
+  grafana:
+  esdata:
+  filebeat:

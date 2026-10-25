@@ -1,0 +1,10 @@
+#!/bin/sh
+# Usage: run-job <import_settlement_file|reconcile_transactions|daily_extract>
+# Same entry point for cron and for humans: `docker compose exec jobs run-job daily_extract`
+set -eu
+case "${1:-}" in
+    import_settlement_file|reconcile_transactions|daily_extract) ;;
+    *) echo "usage: run-job import_settlement_file|reconcile_transactions|daily_extract" >&2; exit 2 ;;
+esac
+cd /app
+exec python -m "lab.jobs.$1"

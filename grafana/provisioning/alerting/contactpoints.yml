@@ -1,0 +1,13 @@
+# The "on-call channel" of the lab: a webhook on the status app that logs every
+# notification as JSON (visible in Kibana as job: alert_notifications).
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: night-shift-oncall
+    receivers:
+      - uid: night-shift-webhook
+        type: webhook
+        settings:
+          url: http://status:8000/webhook/grafana
+          httpMethod: POST

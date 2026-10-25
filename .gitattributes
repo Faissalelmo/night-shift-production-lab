@@ -1,0 +1,6 @@
+# Shell scripts run inside Linux containers and in Git Bash: they must keep LF
+# endings even when the repo is cloned on Windows.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.mp4 binary

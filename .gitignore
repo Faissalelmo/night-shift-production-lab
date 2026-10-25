@@ -1,0 +1,10 @@
+.env
+inbox/*
+archive/*
+!inbox/.gitkeep
+!archive/.gitkeep
+outbox-copy/
+__pycache__/
+*.pyc
+.ruff_cache/
+*.mkv
